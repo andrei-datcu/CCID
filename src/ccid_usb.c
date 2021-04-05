@@ -192,16 +192,274 @@ static void close_libusb_if_needed(void)
 	}
 } /* close_libusb_if_needed */
 
+int LTPBundleFindValueWithKey(list_t *l, const char *key, list_t **values)
+{
+	return -1;
+}
+
+int bundleParse(const char *fileName, list_t *l)
+{
+	return -1;
+}
+
+void bundleRelease(list_t *l)
+{
+}
+
 /*****************************************************************************
  *
  *					OpenUSB
  *
  ****************************************************************************/
-status_t OpenUSB(unsigned int reader_index, /*@unused@*/ int Channel)
+status_t OpenUSB(unsigned int reader_index, int fd)
 {
-	(void)Channel;
+	struct libusb_device_handle* dev_handle = NULL;
+	libusb_device* dev;
+	int rv = 0;
+	const struct libusb_interface *usb_interface = NULL;
+	int interface;
+	int num = 0;
+	const unsigned char *device_descriptor;
+	int numSlots = 0;
+	int interface_number = 0;
 
-	return OpenUSBByName(reader_index, NULL);
+	if (NULL == ctx)
+	{
+		rv = libusb_init(&ctx);
+		if (rv != 0)
+		{
+			DEBUG_CRITICAL2("libusb_init failed: %s", libusb_error_name(rv));
+			return STATUS_UNSUCCESSFUL;
+		}
+	}
+
+	rv = libusb_wrap_sys_device(ctx, (intptr_t)fd, &dev_handle);
+	if (rv < 0)
+	{
+		goto clean;
+	}
+
+	
+	dev = libusb_get_device(dev_handle);
+
+	if (!dev)
+	{
+		(void)libusb_close(dev_handle);
+		goto clean;
+	}
+
+	struct libusb_device_descriptor desc;
+	struct libusb_config_descriptor *config_desc;
+	uint8_t bus_number = libusb_get_bus_number(dev);
+	uint8_t device_address = libusb_get_device_address(dev);
+
+	DEBUG_COMM3("Try device: %d/%d", bus_number, device_address);
+
+	int r = libusb_get_device_descriptor(dev, &desc);
+	if (r < 0)
+	{
+		DEBUG_INFO3("failed to get device descriptor for %d/%d",
+			bus_number, device_address);
+		(void)libusb_close(dev_handle);
+		goto clean;
+	}
+
+	r = libusb_get_active_config_descriptor(dev, &config_desc);
+	if (r < 0)
+	{
+#ifdef __APPLE__
+		/* Some early Gemalto Ezio CB+ readers have
+			* bDeviceClass, bDeviceSubClass and bDeviceProtocol set
+			* to 0xFF (proprietary) instead of 0x00.
+			*
+			* So on Mac OS X the reader configuration is not done
+			* by the OS/kernel and we do it ourself.
+			*/
+		if ((0xFF == desc.bDeviceClass)
+			&& (0xFF == desc.bDeviceSubClass)
+			&& (0xFF == desc.bDeviceProtocol))
+		{
+			r = libusb_set_configuration(dev_handle, 1);
+			if (r < 0)
+			{
+				(void)libusb_close(dev_handle);
+				DEBUG_CRITICAL4("Can't set configuration on %d/%d: %s",
+						bus_number, device_address,
+						libusb_error_name(r));
+				goto clean;
+			}
+		}
+
+		/* recall */
+		r = libusb_get_active_config_descriptor(dev, &config_desc);
+		if (r < 0)
+		{
+#endif
+			(void)libusb_close(dev_handle);
+			DEBUG_CRITICAL4("Can't get config descriptor on %d/%d: %s",
+				bus_number, device_address, libusb_error_name(r));
+			goto clean;
+		}
+#ifdef __APPLE__
+	}
+#endif
+
+
+	usb_interface = get_ccid_usb_interface(config_desc, &num);
+	if (usb_interface == NULL)
+	{
+		libusb_free_config_descriptor(config_desc);
+		(void)libusb_close(dev_handle);
+		if (0 == num)
+			DEBUG_CRITICAL3("Can't find a CCID interface on %d/%d",
+				bus_number, device_address);
+		interface_number = -1;
+		goto clean;
+	}
+
+	device_descriptor = get_ccid_device_descriptor(usb_interface);
+	if (NULL == device_descriptor)
+	{
+		libusb_free_config_descriptor(config_desc);
+		(void)libusb_close(dev_handle);
+		DEBUG_CRITICAL3("Unable to find the device descriptor for %d/%d",
+			bus_number, device_address);
+		goto clean;
+	}
+
+	interface = usb_interface->altsetting->bInterfaceNumber;
+	if (interface_number >= 0 && interface != interface_number)
+	{
+		libusb_free_config_descriptor(config_desc);
+		/* an interface was specified and it is not the
+			* current one */
+		DEBUG_INFO3("Found interface %d but expecting %d",
+			interface, interface_number);
+		(void)libusb_close(dev_handle);
+		goto clean;
+	}
+
+	r = libusb_set_auto_detach_kernel_driver(dev_handle, 1);
+	if (r < 0)
+	{
+		libusb_free_config_descriptor(config_desc);
+		(void)libusb_close(dev_handle);
+		DEBUG_CRITICAL4("Can't set auto detach kernel %d/%d: %s",
+			bus_number, device_address, libusb_error_name(r));
+		interface_number = -1;
+		goto clean;
+	}
+
+	r = libusb_claim_interface(dev_handle, interface);
+	if (r < 0)
+	{
+		libusb_free_config_descriptor(config_desc);
+		(void)libusb_close(dev_handle);
+		DEBUG_CRITICAL4("Can't claim interface %d/%d: %s",
+			bus_number, device_address, libusb_error_name(r));
+		interface_number = -1;
+		goto clean;
+	}
+
+	DEBUG_INFO3("Found Vendor/Product: %04X/%04X",
+		desc.idVendor, desc.idProduct);
+	DEBUG_INFO3("Using USB bus/device: %d/%d",
+		bus_number, device_address);
+
+	/* check for firmware bugs */
+	if (ccid_check_firmware(&desc))
+	{
+		libusb_free_config_descriptor(config_desc);
+		(void)libusb_close(dev_handle);
+		goto clean;
+	}
+
+	/* Get Endpoints values*/
+	(void)get_end_points(config_desc, &usbDevice[reader_index], num);
+
+	/* store device information */
+	usbDevice[reader_index].dev_handle = dev_handle;
+	usbDevice[reader_index].bus_number = bus_number;
+	usbDevice[reader_index].device_address = device_address;
+	usbDevice[reader_index].interface = interface;
+	usbDevice[reader_index].real_nb_opened_slots = 1;
+	usbDevice[reader_index].nb_opened_slots = &usbDevice[reader_index].real_nb_opened_slots;
+	usbDevice[reader_index].polling_transfer = NULL;
+
+	/* CCID common informations */
+	usbDevice[reader_index].ccid.real_bSeq = 0;
+	usbDevice[reader_index].ccid.pbSeq = &usbDevice[reader_index].ccid.real_bSeq;
+	usbDevice[reader_index].ccid.readerID =
+		(desc.idVendor << 16) + desc.idProduct;
+	usbDevice[reader_index].ccid.dwFeatures = dw2i(device_descriptor, 40);
+	usbDevice[reader_index].ccid.wLcdLayout =
+		(device_descriptor[51] << 8) + device_descriptor[50];
+	usbDevice[reader_index].ccid.bPINSupport = device_descriptor[52];
+	usbDevice[reader_index].ccid.dwMaxCCIDMessageLength = dw2i(device_descriptor, 44);
+	usbDevice[reader_index].ccid.dwMaxIFSD = dw2i(device_descriptor, 28);
+	usbDevice[reader_index].ccid.dwDefaultClock = dw2i(device_descriptor, 10);
+	usbDevice[reader_index].ccid.dwMaxDataRate = dw2i(device_descriptor, 23);
+	usbDevice[reader_index].ccid.bMaxSlotIndex = device_descriptor[4];
+	usbDevice[reader_index].ccid.bCurrentSlotIndex = 0;
+	usbDevice[reader_index].ccid.readTimeout = DEFAULT_COM_READ_TIMEOUT;
+	if (device_descriptor[27])
+		usbDevice[reader_index].ccid.arrayOfSupportedDataRates = get_data_rates(reader_index, config_desc, num);
+	else
+	{
+		usbDevice[reader_index].ccid.arrayOfSupportedDataRates = NULL;
+		DEBUG_INFO1("bNumDataRatesSupported is 0");
+	}
+	usbDevice[reader_index].ccid.bInterfaceProtocol = usb_interface->altsetting->bInterfaceProtocol;
+	usbDevice[reader_index].ccid.bNumEndpoints = usb_interface->altsetting->bNumEndpoints;
+	usbDevice[reader_index].ccid.dwSlotStatus = IFD_ICC_PRESENT;
+	usbDevice[reader_index].ccid.bVoltageSupport = device_descriptor[5];
+	usbDevice[reader_index].ccid.sIFD_serial_number = NULL;
+	usbDevice[reader_index].ccid.gemalto_firmware_features = NULL;
+	usbDevice[reader_index].ccid.dwProtocols = dw2i(device_descriptor, 6);
+#ifdef ENABLE_ZLP
+	usbDevice[reader_index].ccid.zlp = FALSE;
+#endif
+	if (desc.iSerialNumber)
+	{
+		unsigned char serial[128];
+		int ret;
+
+		ret = libusb_get_string_descriptor_ascii(dev_handle,
+				desc.iSerialNumber, serial,
+				sizeof(serial));
+		if (ret > 0)
+			usbDevice[reader_index].ccid.sIFD_serial_number
+				= strdup((char *)serial);
+	}
+
+	usbDevice[reader_index].ccid.sIFD_iManufacturer = NULL;
+	if (desc.iManufacturer)
+	{
+		unsigned char iManufacturer[128];
+		int ret;
+
+		ret = libusb_get_string_descriptor_ascii(dev_handle,
+				desc.iManufacturer, iManufacturer,
+				sizeof(iManufacturer));
+		if (ret > 0)
+			usbDevice[reader_index].ccid.sIFD_iManufacturer
+				= strdup((char *)iManufacturer);
+	}
+
+	usbDevice[reader_index].ccid.IFD_bcdDevice = desc.bcdDevice;
+
+	/* If this is a multislot reader, init the multislot stuff */
+	if (usbDevice[reader_index].ccid.bMaxSlotIndex)
+		usbDevice[reader_index].multislot_extension = Multi_CreateFirstSlot(reader_index);
+	else
+		usbDevice[reader_index].multislot_extension = NULL;
+
+	libusb_free_config_descriptor(config_desc);
+	return STATUS_SUCCESS;
+
+clean:
+	close_libusb_if_needed();
+	return STATUS_UNSUCCESSFUL;
 } /* OpenUSB */
 
 

@@ -144,7 +144,10 @@ static RESPONSECODE CreateChannelByNameOrChannel(DWORD Lun,
 	t1_init(&CcidSlots[reader_index].t1, reader_index);
 
 	if (lpcDevice)
-		ret = OpenPortByName(reader_index, lpcDevice);
+	{
+		return_value = IFD_NOT_SUPPORTED;
+		goto error;
+	}
 	else
 		ret = OpenPort(reader_index, Channel);
 
@@ -204,12 +207,7 @@ static RESPONSECODE CreateChannelByNameOrChannel(DWORD Lun,
 		}
 		else
 		{
-			/* Maybe we have a special treatment for this reader */
-			return_value = ccid_open_hack_post(reader_index);
-			if (return_value != IFD_SUCCESS)
-			{
-				DEBUG_CRITICAL("failed");
-			}
+			return_value = IFD_SUCCESS;
 		}
 
 		/* set back the old timeout */
@@ -2057,6 +2055,7 @@ void init_driver(void)
 		bundleRelease(&plist);
 	}
 
+#if 0
 	e = getenv("LIBCCID_ifdLogLevel");
 	if (e)
 	{
@@ -2066,6 +2065,7 @@ void init_driver(void)
 		/* print the log level used */
 		DEBUG_INFO2("LogLevel from LIBCCID_ifdLogLevel: 0x%.4X", LogLevel);
 	}
+#endif
 
 	/* get the voltage parameter */
 	switch ((DriverOptions >> 4) & 0x03)
