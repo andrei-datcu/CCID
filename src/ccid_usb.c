@@ -21,6 +21,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdatomic.h>
 # ifdef S_SPLINT_S
 # include <sys/types.h>
 # endif
@@ -99,12 +100,14 @@ typedef struct
 	_ccid_descriptor ccid;
 
 	/* libusb transfer for the polling (or NULL) */
-	struct libusb_transfer *polling_transfer;
+	struct libusb_transfer * _Atomic polling_transfer;
 
 	/* pointer to the multislot extension (if any) */
 	struct usbDevice_MultiSlot_Extension *multislot_extension;
 
 } _usbDevice;
+
+#define POLLING_TRANSFER_CANCELLED ((struct libusb_transfer*)-1)
 
 /* The _usbDevice structure must be defined before including ccid_usb.h */
 #include "ccid_usb.h"
@@ -384,7 +387,7 @@ status_t OpenUSB(unsigned int reader_index, int fd)
 	usbDevice[reader_index].interface = interface;
 	usbDevice[reader_index].real_nb_opened_slots = 1;
 	usbDevice[reader_index].nb_opened_slots = &usbDevice[reader_index].real_nb_opened_slots;
-	usbDevice[reader_index].polling_transfer = NULL;
+	atomic_init(&usbDevice[reader_index].polling_transfer, NULL);
 
 	/* CCID common informations */
 	usbDevice[reader_index].ccid.real_bSeq = 0;
@@ -959,7 +962,7 @@ again:
 				usbDevice[reader_index].interface = interface;
 				usbDevice[reader_index].real_nb_opened_slots = 1;
 				usbDevice[reader_index].nb_opened_slots = &usbDevice[reader_index].real_nb_opened_slots;
-				usbDevice[reader_index].polling_transfer = NULL;
+				atomic_init(&usbDevice[reader_index].polling_transfer, NULL);
 
 				/* CCID common informations */
 				usbDevice[reader_index].ccid.real_bSeq = 0;
@@ -1615,7 +1618,9 @@ int InterruptRead(int reader_index, int timeout /* in ms */)
 		return IFD_COMMUNICATION_ERROR;
 	}
 
-	usbDevice[reader_index].polling_transfer = transfer;
+	// if it was marked as prematurely cancelled
+	if(atomic_exchange(&usbDevice[reader_index].polling_transfer, transfer) == POLLING_TRANSFER_CANCELLED)
+		goto cancel_transfer;
 
 	while (!completed)
 	{
@@ -1624,6 +1629,7 @@ int InterruptRead(int reader_index, int timeout /* in ms */)
 		{
 			if (ret == LIBUSB_ERROR_INTERRUPTED)
 				continue;
+		cancel_transfer:
 			libusb_cancel_transfer(transfer);
 			while (!completed)
 				if (libusb_handle_events_completed(ctx, &completed) < 0)
@@ -1638,7 +1644,7 @@ int InterruptRead(int reader_index, int timeout /* in ms */)
 	actual_length = transfer->actual_length;
 	ret = transfer->status;
 
-	usbDevice[reader_index].polling_transfer = NULL;
+	atomic_store(&usbDevice[reader_index].polling_transfer, NULL);
 	libusb_free_transfer(transfer);
 
 	DEBUG_PERIODIC3("after (%d) (%d)", reader_index, ret);
@@ -1680,9 +1686,8 @@ void InterruptStop(int reader_index)
 		return;
 	}
 
-	transfer = usbDevice[reader_index].polling_transfer;
-	usbDevice[reader_index].polling_transfer = NULL;
-	if (transfer)
+	transfer = atomic_exchange(&usbDevice[reader_index].polling_transfer, POLLING_TRANSFER_CANCELLED);
+	if (transfer && transfer != POLLING_TRANSFER_CANCELLED)
 	{
 		int ret;
 
@@ -1744,7 +1749,9 @@ static void *Multi_PollingProc(void *p_ext)
 			break;
 		}
 
-		usbDevice[msExt->reader_index].polling_transfer = transfer;
+		// check if it was marked as prematurelly cancelled
+		if(atomic_exchange(&usbDevice[msExt->reader_index].polling_transfer, transfer) == POLLING_TRANSFER_CANCELLED)
+			goto cancel_transfer;
 
 		completed = 0;
 		while (!completed && !msExt->terminated)
@@ -1758,6 +1765,7 @@ static void *Multi_PollingProc(void *p_ext)
 				if (rv == LIBUSB_ERROR_INTERRUPTED)
 					continue;
 
+			cancel_transfer:
 				libusb_cancel_transfer(transfer);
 
 				while (!completed && !msExt->terminated)
@@ -1770,7 +1778,7 @@ static void *Multi_PollingProc(void *p_ext)
 			}
 		}
 
-		usbDevice[msExt->reader_index].polling_transfer = NULL;
+		atomic_store(&usbDevice[msExt->reader_index].polling_transfer, NULL);
 
 		if (rv < 0)
 			libusb_free_transfer(transfer);
@@ -1897,9 +1905,9 @@ static void Multi_PollingTerminate(struct usbDevice_MultiSlot_Extension *msExt)
 	{
 		msExt->terminated = TRUE;
 
-		transfer = usbDevice[msExt->reader_index].polling_transfer;
+		transfer = atomic_exchange(&usbDevice[msExt->reader_index].polling_transfer, POLLING_TRANSFER_CANCELLED);
 
-		if (transfer)
+		if (transfer && transfer != POLLING_TRANSFER_CANCELLED)
 		{
 			int ret;
 
