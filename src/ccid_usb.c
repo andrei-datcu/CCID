@@ -1148,14 +1148,22 @@ status_t ReadUSB(unsigned int reader_index, unsigned int * length,
 	char debug_header[] = "<- 121234 ";
 	_ccid_descriptor *ccid_descriptor = get_ccid_descriptor(reader_index);
 	int duplicate_frame = 0;
+	static unsigned int kMaxTransferSize = 16384;
+	int remaining, thisChunk, thisChunkActual;
 
 read_again:
 	(void)snprintf(debug_header, sizeof(debug_header), "<- %06X ",
 		(int)reader_index);
 
+	actual_length = 0;
+	remaining = *length;
+	do {
+
+	thisChunk = remaining < kMaxTransferSize ? remaining : kMaxTransferSize;
+	thisChunkActual = 0;
 	rv = libusb_bulk_transfer(usbDevice[reader_index].dev_handle,
-		usbDevice[reader_index].bulk_in, buffer, *length,
-		&actual_length, usbDevice[reader_index].ccid.readTimeout);
+		usbDevice[reader_index].bulk_in, buffer + actual_length, thisChunk,
+		&thisChunkActual, usbDevice[reader_index].ccid.readTimeout);
 
 	if (rv < 0)
 	{
@@ -1169,6 +1177,13 @@ read_again:
 
 		return STATUS_UNSUCCESSFUL;
 	}
+	actual_length += thisChunkActual;
+	remaining -= thisChunkActual;
+
+	// if a chunk comes up short (reads fewer bytes than requested)
+	// we stop, even if there are more bytes `remaining`
+	} while (remaining && thisChunk == thisChunkActual);
+
 
 	*length = actual_length;
 
