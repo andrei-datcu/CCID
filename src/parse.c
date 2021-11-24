@@ -1,16 +1,16 @@
 /*
-    parse.c: parse CCID structure
-    Copyright (C) 2003-2010   Ludovic Rousseau
+	parse.c: parse CCID structure
+	Copyright (C) 2003-2010   Ludovic Rousseau
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
+	This program is free software; you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation; either version 2 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
 	You should have received a copy of the GNU General Public License along
 	with this program; if not, write to the Free Software Foundation, Inc., 51
@@ -75,15 +75,15 @@ int main(int argc, char *argv[])
 	if (r < 0)
 	{
 		(void)printf("libusb_init() failed: %s\n", libusb_error_name(r));
-        return r;
+		return r;
 	}
 
 	cnt = libusb_get_device_list(NULL, &devs);
-    if (cnt < 0)
+	if (cnt < 0)
 	{
 		(void)printf("libusb_get_device_list() failed: %s\n",
 			libusb_error_name(r));
-        return (int)cnt;
+		return (int)cnt;
 	}
 
 	/* for every device */
@@ -114,18 +114,18 @@ int main(int argc, char *argv[])
 		}
 
 		r = libusb_get_device_descriptor(dev, &desc);
-        if (r < 0)
+		if (r < 0)
 		{
-            (void)fprintf(stderr,
+			(void)fprintf(stderr,
 				BRIGHT_RED "failed to get device descriptor: %s" NORMAL,
 				libusb_error_name(r));
-            return 1;
-        }
+			return 1;
+		}
 
 		(void)fprintf(stderr,
 			"Parsing USB bus/device: %04X:%04X (bus %d, device %d)\n",
 			desc.idVendor, desc.idProduct,
-            libusb_get_bus_number(dev), libusb_get_device_address(dev));
+			libusb_get_bus_number(dev), libusb_get_device_address(dev));
 
 		(void)fprintf(stderr, " idVendor:  0x%04X", desc.idVendor);
 		r = libusb_get_string_descriptor_ascii(handle, desc.iManufacturer,
@@ -412,10 +412,15 @@ static int ccid_parse_interface_descriptor(libusb_device_handle *handle,
 
 	(void)printf("  dwDefaultClock: %.3f MHz\n", dw2i(device_descriptor, 10)/1000.0);
 	(void)printf("  dwMaximumClock: %.3f MHz\n", dw2i(device_descriptor, 14)/1000.0);
-	(void)printf("  bNumClockSupported: %d%s\n", device_descriptor[18],
-		device_descriptor[18] ? "" : " (will use whatever is returned)");
+	int bNumClockSupported = device_descriptor[18];
+	(void)printf("  bNumClockSupported: %d%s\n", bNumClockSupported,
+		bNumClockSupported ? "" : " (will use whatever is returned)");
 	{
 		int n;
+
+		if (0 == bNumClockSupported)
+			/* read up to the buffer size */
+			bNumClockSupported = sizeof(buffer) / sizeof(int);
 
 		/* See CCID 5.3.2 page 24 */
 		n = libusb_control_transfer(handle,
@@ -424,7 +429,7 @@ static int ccid_parse_interface_descriptor(libusb_device_handle *handle,
 			0x00, /* value */
 			usb_interface_descriptor->bInterfaceNumber, /* interface */
 			buffer,
-			sizeof(buffer),
+			bNumClockSupported * sizeof(int),
 			2 * 1000);
 
 		/* we got an error? */
@@ -446,15 +451,15 @@ static int ccid_parse_interface_descriptor(libusb_device_handle *handle,
 				int i;
 
 				/* we do not get the expected number of data rates */
-				if ((n != device_descriptor[18]*4) && device_descriptor[18])
+				if ((n != bNumClockSupported*4) && bNumClockSupported)
 				{
 					(void)printf("   Got %d clock frequencies but was expecting %d\n",
-						n/4, device_descriptor[18]);
+						n/4, bNumClockSupported);
 
 					/* we got more data than expected */
 #ifndef DISPLAY_EXTRA_VALUES
-					if (n > device_descriptor[18]*4)
-						n = device_descriptor[18]*4;
+					if (n > bNumClockSupported*4)
+						n = bNumClockSupported*4;
 #endif
 				}
 
@@ -469,10 +474,13 @@ static int ccid_parse_interface_descriptor(libusb_device_handle *handle,
 		bNumDataRatesSupported ? "" : " (will use whatever is returned)");
 	{
 		int n;
+		int n_max;
 
 		if (0 == bNumDataRatesSupported)
 			/* read up to the buffer size */
-			bNumDataRatesSupported = sizeof(buffer) / sizeof(int);
+			n_max = sizeof(buffer) / sizeof(int);
+		else
+			n_max = bNumDataRatesSupported;
 
 		/* See CCID 5.3.3 page 24 */
 		n = libusb_control_transfer(handle,
@@ -481,7 +489,7 @@ static int ccid_parse_interface_descriptor(libusb_device_handle *handle,
 			0x00, /* value */
 			usb_interface_descriptor->bInterfaceNumber, /* interface */
 			buffer,
-			bNumDataRatesSupported * sizeof(int),
+			n_max * sizeof(int),
 			2 * 1000);
 
 		/* we got an error? */
@@ -496,15 +504,15 @@ static int ccid_parse_interface_descriptor(libusb_device_handle *handle,
 				int i;
 
 				/* we do not get the expected number of data rates */
-				if ((n != device_descriptor[27]*4) && device_descriptor[27])
+				if ((n != bNumDataRatesSupported*4) && bNumDataRatesSupported)
 				{
 					(void)printf("   Got %d data rates but was expecting %d\n", n/4,
-						device_descriptor[27]);
+						bNumDataRatesSupported);
 
 					/* we got more data than expected */
 #ifndef DISPLAY_EXTRA_VALUES
-					if (n > device_descriptor[27]*4)
-						n = device_descriptor[27]*4;
+					if (n > bNumDataRatesSupported*4)
+						n = bNumDataRatesSupported*4;
 #endif
 				}
 
@@ -557,7 +565,7 @@ static int ccid_parse_interface_descriptor(libusb_device_handle *handle,
 	if (device_descriptor[41] & 0x04)
 		(void)printf("   ..04.. Automatic IFSD exchange as first exchange (T=1)\n");
 	if (device_descriptor[41] & 0x08)
-		(void)printf("   ..08.. Unknown (ICCD?)\n");
+		(void)printf("   ..08.. ICCD token\n");
 	switch (device_descriptor[42] & 0x07)
 	{
 		case 0x00:

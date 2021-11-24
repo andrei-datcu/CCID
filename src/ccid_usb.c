@@ -107,6 +107,7 @@ typedef struct
 	/* pointer to the multislot extension (if any) */
 	struct usbDevice_MultiSlot_Extension *multislot_extension;
 
+	char disconnected;
 } _usbDevice;
 
 /* The _usbDevice structure must be defined before including ccid_usb.h */
@@ -390,6 +391,7 @@ status_t OpenUSB(unsigned int reader_index, int fd)
 	usbDevice[reader_index].polling_transfer = NULL;
 	usbDevice[reader_index].polling_transfer_cancelled = 0;
 	pthread_mutex_init(&usbDevice[reader_index].polling_transfer_mutex, NULL);
+	usbDevice[reader_index].disconnected = FALSE;
 
 	/* CCID common informations */
 	usbDevice[reader_index].ccid.real_bSeq = 0;
@@ -662,7 +664,7 @@ again_libusb:
 			if ((device_bus || device_addr)
 				&& ((bus_number != device_bus)
 				|| (device_address != device_addr))) {
-				/* not USB the device we are looking for */
+				/* not the USB device we are looking for */
 				continue;
 			}
 #endif
@@ -806,7 +808,7 @@ again_libusb:
 					}
 					else
 					{
-						/* if an interface number is given by HAL we
+						/* if an interface number is given by udev we
 						 * continue with this device. */
 						if (-1 == interface_number)
 						{
@@ -967,6 +969,7 @@ again:
 				usbDevice[reader_index].polling_transfer = NULL;
 				usbDevice[reader_index].polling_transfer_cancelled = 0;
 				pthread_mutex_init(&usbDevice[reader_index].polling_transfer_mutex, NULL);
+				usbDevice[reader_index].disconnected = FALSE;
 
 				/* CCID common informations */
 				usbDevice[reader_index].ccid.real_bSeq = 0;
@@ -1105,6 +1108,12 @@ status_t WriteUSB(unsigned int reader_index, unsigned int length,
 	(void)snprintf(debug_header, sizeof(debug_header), "-> %06X ",
 		(int)reader_index);
 
+	if (usbDevice[reader_index].disconnected)
+	{
+		DEBUG_COMM("Reader disconnected");
+		return STATUS_NO_SUCH_DEVICE;
+	}
+
 #ifdef ENABLE_ZLP
 	if (usbDevice[reader_index].ccid.zlp)
 	{ /* Zero Length Packet */
@@ -1154,6 +1163,12 @@ status_t ReadUSB(unsigned int reader_index, unsigned int * length,
 	int duplicate_frame = 0;
 	static unsigned int kMaxTransferSize = 16384;
 	int remaining, thisChunk, thisChunkActual;
+
+	if (usbDevice[reader_index].disconnected)
+	{
+		DEBUG_COMM("Reader disconnected");
+		return STATUS_NO_SUCH_DEVICE;
+	}
 
 read_again:
 	(void)snprintf(debug_header, sizeof(debug_header), "<- %06X ",
@@ -1283,6 +1298,29 @@ status_t CloseUSB(unsigned int reader_index)
 
 	return STATUS_SUCCESS;
 } /* CloseUSB */
+
+
+/*****************************************************************************
+ *
+ *					DisconnectUSB
+ *
+ ****************************************************************************/
+status_t DisconnectUSB(unsigned int reader_index)
+{
+	DEBUG_COMM("Disconnect reader");
+	libusb_device_handle * dev_handle = usbDevice[reader_index].dev_handle;
+
+	for (int i=0; i<CCID_DRIVER_MAX_READERS; i++)
+	{
+		if (usbDevice[i].dev_handle == dev_handle)
+		{
+			DEBUG_COMM2("Disconnect reader: %d", i);
+			usbDevice[i].disconnected = TRUE;
+		}
+	}
+
+	return STATUS_SUCCESS;
+} /* DisconnectUSB */
 
 
 /*****************************************************************************
@@ -1869,7 +1907,7 @@ static void *Multi_PollingProc(void *p_ext)
 							change = (slot_status & 2) ? "status changed" : "no change";
 
 							DEBUG_COMM3("slot %d status: %d",
-								s + b*4, slot_status);
+								s + slot, slot_status);
 							DEBUG_COMM3("ICC %s, %s", present, change);
 						}
 						slot += 4;
@@ -1993,9 +2031,9 @@ static int Multi_InterruptRead(int reader_index, int timeout /* in ms */)
 
 	msExt = usbDevice[reader_index].multislot_extension;
 
-	/* When stopped, return 0 so IFDHPolling will return IFD_NO_SUCH_DEVICE */
+	/* When stopped, returns IFD_NO_SUCH_DEVICE */
 	if ((msExt == NULL) || msExt->terminated)
-		return 0;
+		return IFD_NO_SUCH_DEVICE;
 
 	DEBUG_PERIODIC3("Multi_InterruptRead (%d), timeout: %d ms",
 		reader_index, timeout);
@@ -2033,9 +2071,9 @@ again:
 	/* Don't forget to unlock the mutex */
 	pthread_mutex_unlock(&msExt->mutex);
 
-	/* When stopped, return 0 so IFDHPolling will return IFD_NO_SUCH_DEVICE */
+	/* When stopped, returns IFD_NO_SUCH_DEVICE */
 	if (msExt->terminated)
-		return 0;
+		return IFD_NO_SUCH_DEVICE;
 
 	/* Not stopped */
 	if (status == LIBUSB_TRANSFER_COMPLETED)
