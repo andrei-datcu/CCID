@@ -1941,11 +1941,13 @@ EXTERNAL RESPONSECODE IFDHICCPresence(DWORD Lun)
 	/* set back the old LogLevel */
 	LogLevel = oldLogLevel;
 
+# if 0
 	if (IFD_NO_SUCH_DEVICE == return_value)
 	{
 		return_value = IFD_ICC_NOT_PRESENT;
 		goto end;
 	}
+#endif
 
 	if (return_value != IFD_SUCCESS)
 		return return_value;
